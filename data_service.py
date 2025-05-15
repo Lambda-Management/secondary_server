@@ -9,6 +9,7 @@ import pickle
 import traceback
 import uvicorn
 import requests
+import numpy as np
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,12 +19,16 @@ from collections import deque
 from pydantic import BaseModel
 
 # Thêm thư mục gốc vào sys.path để import các module cần thiết
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import WebSocket client và các hàm cần thiết từ dự án chính
-from websocket_client import BingxWebSocketClient
-from crawldata import get_ohclv
-from utils import convert_numpy_to_python
+# from websocket_client import BingxWebSocketClient
+# from crawldata import get_ohclv
+# from utils import convert_numpy_to_python
+
+# Import các module nội bộ độc lập
+from websocket_handler import BingxWebSocketClient
+from rest_api import get_ohclv
 
 # Cấu hình logging
 logging.basicConfig(
@@ -51,7 +56,6 @@ app.add_middleware(
 # Cấu hình server
 SERVER_ID = os.environ.get("SERVER_ID", "secondary")  # "primary" hoặc "secondary"
 SERVER_PORT = int(os.environ.get("SERVER_PORT", 8080))
-MAIN_SERVER_URL = os.environ.get("MAIN_SERVER_URL", "http://localhost:8000")
 MAX_KLINE_CANDLES = 1200  # Số lượng nến tối đa lưu trong cache
 
 # Đường dẫn thư mục cache
@@ -456,51 +460,6 @@ def subscribe_to_symbols(symbols: List[str], timeframe: str):
         logger.error(traceback.format_exc())
         return False
 
-def sync_with_main_server():
-    """Đồng bộ danh sách symbols với server chính."""
-    try:
-        # Chỉ thực hiện nếu là server phụ
-        if SERVER_ID != "secondary":
-            logger.info("This is the primary server, no need to sync")
-            return
-            
-        # Gọi API từ server chính để lấy danh sách symbols
-        response = requests.get(f"{MAIN_SERVER_URL}/api/symbols")
-        
-        if response.status_code != 200:
-            logger.error(f"Failed to get symbols from main server: {response.text}")
-            return
-            
-        data = response.json()
-        symbols = data.get("symbols", [])
-        timeframe = data.get("timeframe", "5m")
-        
-        if not symbols:
-            logger.warning("No symbols received from main server")
-            return
-            
-        logger.info(f"Received {len(symbols)} symbols from main server")
-        
-        # Xác định symbols được phân công cho server này
-        assigned_symbols = get_assigned_symbols(symbols)
-        
-        # Subscribe vào WebSocket
-        subscribe_to_symbols(list(assigned_symbols), timeframe)
-        
-    except Exception as e:
-        logger.error(f"Error syncing with main server: {e}")
-        logger.error(traceback.format_exc())
-
-def background_sync():
-    """Hàm chạy trong background để đồng bộ với server chính."""
-    while True:
-        try:
-            sync_with_main_server()
-            time.sleep(3600)  # Đồng bộ mỗi giờ
-        except Exception as e:
-            logger.error(f"Error in background sync: {e}")
-            time.sleep(300)  # Thử lại sau 5 phút nếu có lỗi
-
 def initialize_websocket_data(symbols: List[str], timeframe: str, limit: int = 1000):
     """
     Khởi tạo dữ liệu websocket từ dữ liệu lịch sử.
@@ -578,11 +537,9 @@ async def startup_event():
     if not start_websocket_client():
         logger.error("Failed to start WebSocket client")
         return
-        
-    # Bắt đầu background sync task nếu là server phụ
-    if SERVER_ID == "secondary":
-        threading.Thread(target=background_sync, daemon=True).start()
-        logger.info("Started background sync thread")
+    
+    # Remove the background sync thread since we're removing secondary-to-primary communication
+    logger.info(f"Server started with ID: {SERVER_ID}")
 
 @app.get("/api/health", response_model=HealthCheckResponse)
 async def health_check():
@@ -790,11 +747,31 @@ async def get_batch_klines(request: SymbolRequest):
             detail=str(e)
         )
 
+# Hàm chuyển đổi numpy/pandas types sang các kiểu Python cơ bản
+def convert_numpy_to_python(obj):
+    """Convert numpy/pandas types to standard Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: convert_numpy_to_python(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_to_python(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_to_python(item) for item in obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return convert_numpy_to_python(obj.tolist())
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    else:
+        return obj
+
 if __name__ == "__main__":
     # Khởi động server
     uvicorn.run(
         "data_service:app", 
-        host="0.0.0.0", 
+        host="0.0.0.0",  # Listen on all network interfaces
         port=SERVER_PORT,
-        reload=True
+        reload=False     # Set to False in production
     ) 
