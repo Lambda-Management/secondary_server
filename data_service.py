@@ -545,7 +545,15 @@ async def startup_event():
         return
     
     # Remove the background sync thread since we're removing secondary-to-primary communication
-    logger.info(f"Server started with ID: {SERVER_ID}")
+    server_ip = os.environ.get("PUBLIC_IP_ADDRESS", "0.0.0.0")
+    logger.info(f"Server started with ID: {SERVER_ID} on {server_ip}:{SERVER_PORT}")
+    
+    # Log environment variables for debugging
+    logger.info(f"Environment variables:")
+    logger.info(f"  SERVER_ID: {os.environ.get('SERVER_ID', 'Not set')}")
+    logger.info(f"  SERVER_PORT: {os.environ.get('SERVER_PORT', 'Not set')}")
+    logger.info(f"  PRIMARY_DATA_SERVER: {os.environ.get('PRIMARY_DATA_SERVER', 'Not set')}")
+    logger.info(f"  SECONDARY_DATA_SERVER: {os.environ.get('SECONDARY_DATA_SERVER', 'Not set')}")
 
 @app.get("/api/health", response_model=HealthCheckResponse)
 async def health_check():

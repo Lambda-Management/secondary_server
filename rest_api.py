@@ -27,11 +27,11 @@ def get_ohclv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> List[Dic
     try:
         # Map timeframe từ định dạng '5m' sang định dạng API '5min'
         interval_map = {
-            "1m": "1min", 
-            "3m": "3min", 
-            "5m": "5min", 
-            "15m": "15min", 
-            "30m": "30min",
+            "1m": "1m", 
+            "3m": "3m", 
+            "5m": "5m", 
+            "15m": "15m", 
+            "30m": "30m",
             "1h": "1h", 
             "4h": "4h", 
             "1d": "1d", 
@@ -39,7 +39,7 @@ def get_ohclv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> List[Dic
             "1M": "1M"
         }
         
-        interval = interval_map.get(timeframe, "5min")
+        interval = interval_map.get(timeframe, "5m")
         
         # Thêm -USDT vào symbol nếu cần
         full_symbol = f"{symbol}-USDT" if "-" not in symbol else symbol
@@ -119,7 +119,7 @@ def check_symbol_exists(symbol: str) -> bool:
         # Thử lấy dữ liệu nến để kiểm tra symbol tồn tại
         response = requests.get(
             f"{BASE_URL}{KLINE_ENDPOINT}", 
-            params={"symbol": full_symbol, "interval": "1min", "limit": 1},
+            params={"symbol": full_symbol, "interval": "5m", "limit": 1},
             timeout=5
         )
         
