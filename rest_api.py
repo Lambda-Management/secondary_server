@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # URL API của Bingx
 BASE_URL = "https://open-api.bingx.com"
-KLINE_ENDPOINT = "/openApi/swap/v2/quote/klines"
+KLINE_ENDPOINT = "/openApi/swap/v3/quote/klines"
 
 def get_ohclv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> List[Dict[str, Any]]:
     """

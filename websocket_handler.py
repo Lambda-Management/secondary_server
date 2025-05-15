@@ -9,6 +9,8 @@ from typing import Dict, List, Any, Optional, Set
 from collections import deque
 from datetime import datetime
 import codecs
+import gzip
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -58,94 +60,82 @@ class BingxWebSocketClient:
         asyncio.run(self._websocket_loop())
             
     async def _websocket_loop(self):
-        """Loop chính của WebSocket"""
-        reconnect_delay = 1
-        max_reconnect_delay = 60
+        """Main WebSocket connection loop."""
+        reconnect_delay = 1.0
+        max_reconnect_delay = 60.0
         
         while self.running:
             try:
-                logger.info("Connecting to Bingx WebSocket...")
+                logger.info(f"Connecting to WebSocket at {self.url}")
                 
-                # Add ping_interval and ping_timeout parameters to handle automatic pings
-                async with websockets.connect(
-                    self.url,
-                    ping_interval=None,   # Disable automatic ping to handle manually
-                    ping_timeout=10,      # Wait 10 seconds for pong response
-                    close_timeout=5,      # Wait 5 seconds for graceful close
-                    max_size=10 * 1024 * 1024  # 10MB max message size for large responses
-                ) as websocket:
+                # Connect to WebSocket API
+                async with websockets.connect(self.url) as websocket:
                     self.websocket = websocket
                     self.connected = True
-                    reconnect_delay = 1  # Reset delay on successful connection
-                    logger.info("Connected to Bingx WebSocket")
+                    self.reconnecting = False
+                    self.last_message_time = time.time()
+                    logger.info("WebSocket connected successfully")
                     
-                    # Send initial ping to verify connection
-                    await websocket.ping()
+                    # Resubscribe to existing channels
+                    if self.subscriptions:
+                        logger.info(f"Resubscribing to {len(self.subscriptions)} channels")
+                        await self._resubscribe()
                     
-                    # Resubscribe to all symbols
-                    await self._resubscribe()
+                    # Reset reconnect delay on successful connection
+                    reconnect_delay = 1.0
                     
-                    # Keep track of last message time for custom keepalive
-                    last_message_time = time.time()
-                    last_ping_time = time.time()
-                    ping_interval = 20  # Send ping every 20 seconds
-                    
-                    # Process incoming messages
                     while self.running:
                         try:
-                            # Check if we need to send a manual ping
-                            current_time = time.time()
-                            
-                            # Send periodic pings even if we're receiving messages
-                            if current_time - last_ping_time > ping_interval:
-                                logger.debug(f"Sending scheduled ping (interval: {ping_interval}s)")
-                                try:
-                                    await websocket.ping()
-                                    last_ping_time = current_time
-                                except Exception as e:
-                                    logger.error(f"Error sending scheduled ping: {e}")
-                                    break
-                            
-                            # Additional check for stalled connection
-                            if current_time - last_message_time > 60:  # No message for 60 seconds
-                                logger.warning(f"No messages for 60 seconds, reconnecting...")
-                                break
-                                
-                            # Wait for next message with timeout
+                            # Set timeout for receiving messages
                             message = await asyncio.wait_for(websocket.recv(), timeout=30)
-                            last_message_time = current_time  # Update last message time
+                            
+                            # Process the received message
                             await self._process_message(message)
                             
                         except asyncio.TimeoutError:
-                            # No message received for 30 seconds, send ping to keep connection alive
-                            logger.warning("No message received for 30 seconds, checking connection...")
-                            try:
-                                pong_waiter = await websocket.ping()
-                                await asyncio.wait_for(pong_waiter, timeout=10)
-                                logger.debug("Ping successful, connection still alive")
-                                last_ping_time = time.time()  # Update last ping time
-                            except asyncio.TimeoutError:
-                                logger.warning("Ping timeout, reconnecting...")
-                                break
-                            except Exception as e:
-                                logger.error(f"Error during ping: {e}")
-                                break
+                            # Check if we haven't received any message for a while
+                            time_since_last = time.time() - self.last_message_time
+                            
+                            if time_since_last > 30:
+                                logger.warning(f"No message received for {time_since_last:.0f} seconds, checking connection...")
+                                try:
+                                    # Send ping to check connection
+                                    await websocket.send("Ping")  # Use standard ping for Bingx
+                                    logger.debug("Sent ping to check connection")
+                                except Exception as e:
+                                    logger.error(f"Error sending ping: {e}")
+                                    break  # Connection likely broken, exit inner loop to reconnect
+                            
+                            # If no messages for too long, force reconnect
+                            if time_since_last > 60:
+                                logger.warning(f"No messages for {time_since_last:.0f} seconds, reconnecting...")
+                                break  # Exit inner loop to reconnect
+                                
                         except websockets.exceptions.ConnectionClosed as e:
                             logger.warning(f"WebSocket connection closed: {e}")
                             break
-            
-            except Exception as e:
-                logger.error(f"WebSocket error: {e}")
-                logger.error(traceback.format_exc())
+                            
+                        except Exception as e:
+                            logger.error(f"Error in websocket loop: {e}")
+                            logger.error(traceback.format_exc())
+                            # Continue and try to receive next message
                 
-            finally:
+                # If we exited the inner loop, connection is closed
+                logger.warning("WebSocket connection closed, reconnecting...")
                 self.connected = False
                 self.websocket = None
                 
-                if self.running:
-                    logger.info(f"Reconnecting in {reconnect_delay} seconds...")
-                    await asyncio.sleep(reconnect_delay)
-                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+            except Exception as e:
+                self.connected = False
+                self.websocket = None
+                logger.error(f"WebSocket connection error: {e}")
+                logger.error(traceback.format_exc())
+                
+            # Wait before reconnecting, with exponential backoff
+            self.reconnecting = True
+            logger.info(f"Reconnecting in {reconnect_delay:.1f} seconds...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
     
     async def _resubscribe(self):
         """Đăng ký lại các symbols đã đăng ký trước đó"""
@@ -165,220 +155,155 @@ class BingxWebSocketClient:
         logger.info("Resubscription completed")
     
     async def _process_message(self, message):
-        """Xử lý message từ WebSocket"""
+        """Process incoming websocket message."""
         try:
-            # Log raw message for debugging (only in debug mode)
-            if isinstance(message, str) and len(message) < 50:
-                logger.debug(f"Raw WebSocket message: '{message}'")
-            
-            # Check if message is a simple ping (not JSON)
-            if isinstance(message, str) and message.strip().lower() in ["ping", "ping..."]:
-                logger.info(f"Received simple text ping message: '{message}', sending pong")
-                if self.websocket and self.connected:
-                    await self.websocket.send("pong")
-                return
-            
-            # Check if the message is binary data
-            if isinstance(message, bytes):
-                # Check for gzip compression (magic bytes 0x1f 0x8b)
-                if len(message) > 2 and message[0] == 0x1f and message[1] == 0x8b:
-                    import gzip
+            # Kiểm tra xem dữ liệu có nén không
+            try:
+                # Thử giải nén với gzip nếu là binary data
+                if isinstance(message, bytes):
                     try:
-                        # Decompress the message
-                        message = gzip.decompress(message).decode('utf-8')
+                        compressed_data = gzip.GzipFile(fileobj=io.BytesIO(message), mode='rb')
+                        decompressed_data = compressed_data.read()
+                        message = decompressed_data.decode('utf-8')
+                        logger.debug("Successfully decompressed gzip data")
                     except Exception as e:
-                        logger.error(f"Failed to decompress gzip data: {e}")
-                        return
-                else:
-                    # Try different encodings
-                    try:
+                        logger.debug(f"Not gzipped data or decompression failed: {e}")
+                        # Nếu không phải gzip, thử decode trực tiếp
                         message = message.decode('utf-8')
-                    except UnicodeDecodeError:
-                        try:
-                            message = message.decode('latin-1')
-                        except Exception as e:
-                            logger.error(f"Failed to decode binary message: {e}")
-                            return
-            
-            # Skip empty messages
-            if not message or (isinstance(message, str) and not message.strip()):
-                logger.debug("Received empty message, skipping")
+            except Exception as e:
+                logger.debug(f"Error during decompression/decoding: {e}")
+                # Nếu không thể decode, giả định là message đã là text
+                pass
+
+            # Xử lý ping từ server - rất quan trọng để duy trì kết nối
+            if message == "Ping":
+                logger.debug("Received Ping, sending Pong")
+                await self.websocket.send("Pong")
+                self.last_message_time = time.time()
                 return
-                    
-            # Now try to parse JSON
+
+            # Trường hợp đặc biệt "ping..." trong một số phiên bản API
+            if "ping" in message:
+                try:
+                    await self._send_pong(message)
+                    self.last_message_time = time.time()
+                    return
+                except Exception as e:
+                    logger.error(f"Error sending pong response: {e}")
+
+            # Parse JSON message
             try:
                 data = json.loads(message)
-            except json.JSONDecodeError:
-                # Handle non-JSON messages better
-                if isinstance(message, str):
-                    text_msg = message.strip()
-                    # Common non-JSON ping messages that Bingx might send
-                    if text_msg.lower() in ["ping", "ping...", "keepalive", "heartbeat"]:
-                        logger.info(f"Received non-JSON ping: '{text_msg}', sending pong")
-                        if self.websocket and self.connected:
-                            await self.websocket.send("pong")
-                        return
                 
-                # Other invalid JSON - log truncated message
-                truncated_msg = message[:100] + "..." if isinstance(message, str) and len(message) > 100 else message
-                logger.error(f"Invalid JSON received: {truncated_msg}")
-                return
-            
-            # Xử lý heartbeat
-            if "ping" in data:
-                await self._send_pong(data["ping"])
-                return
+                # Kiểm tra lỗi từ server
+                if 'code' in data and data['code'] != 0 and data['code'] != "":
+                    logger.error(f"Error from WebSocket: {data}")
+                    return
+
+                # Xử lý dữ liệu kline
+                if 'dataType' in data and '@kline_' in data.get('dataType', ''):
+                    await self._process_kline(data)
+                    self.last_message_time = time.time()
+                    return
+
+                # Xử lý các loại dữ liệu khác nếu cần
+                logger.debug(f"Received other message type: {data}")
+                self.last_message_time = time.time()
                 
-            # Kiểm tra lỗi
-            if "code" in data and data["code"] != 0:
-                logger.error(f"Error from WebSocket: {data}")
-                return
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse message as JSON: {message[:200]}... Error: {e}")
                 
-            # Xử lý dữ liệu kline
-            if "data" in data and "e" in data:
-                if data["e"] == "kline":
-                    await self._process_kline(data["data"])
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             logger.error(traceback.format_exc())
     
     async def _process_kline(self, data):
-        """Xử lý dữ liệu kline từ WebSocket"""
+        """Process kline data from websocket."""
         try:
-            # First log the raw data format
-            log_data = str(data)[:200] + "..." if isinstance(data, str) and len(str(data)) > 200 else data
-            logger.debug(f"Processing kline data: {log_data}")
+            # Log raw data format for debugging
+            logger.debug(f"Processing kline data: {data}")
             
-            if not data:
-                logger.warning("Received empty kline data")
+            # Extract symbol and interval from dataType
+            data_type = data.get('dataType', '')
+            if '@kline_' not in data_type:
+                logger.warning(f"Invalid kline dataType: {data_type}")
                 return
             
-            # Handle different data types
-            if isinstance(data, str):
-                # Try to parse string as JSON
-                try:
-                    data = json.loads(data)
-                except json.JSONDecodeError:
-                    logger.error(f"Cannot parse kline string data as JSON: {data[:100]}...")
-                    return
-            
-            if not isinstance(data, dict):
-                logger.error(f"Unexpected kline data type: {type(data)}")
+            parts = data_type.split('@kline_')
+            if len(parts) != 2:
+                logger.warning(f"Could not parse dataType: {data_type}")
                 return
-                
-            # Extract symbol from the message
-            symbol_raw = data.get("s", "")  # e.g., "BTC-USDT"
-            if not symbol_raw:
-                # Try alternative fields for symbol
-                alt_fields = ["symbol", "Symbol", "pair", "Pair"]
-                for field in alt_fields:
-                    if field in data and data[field]:
-                        symbol_raw = data[field]
-                        break
-                        
-            if not symbol_raw:
-                logger.warning(f"Missing symbol in kline data: {data}")
-                return
-                
-            # Extract base symbol without -USDT
-            symbol = symbol_raw.split("-")[0] if "-" in symbol_raw else symbol_raw
             
-            # Extract interval/timeframe
-            interval = data.get("i", "")
-            if not interval:
-                # Try alternative fields for interval
-                alt_fields = ["interval", "timeframe", "Interval", "Timeframe"]
-                for field in alt_fields:
-                    if field in data and data[field]:
-                        interval = data[field]
-                        break
-                        
-            if not interval:
-                logger.warning(f"Missing interval in kline data for {symbol}")
+            symbol_with_suffix = parts[0]  # Example: "BTC-USDT"
+            interval = parts[1]            # Example: "1m"
+            
+            # Extract base symbol (without -USDT)
+            symbol = symbol_with_suffix.split('-')[0]
+            
+            # Extract kline data from response
+            kline_data = data.get('data', {})
+            if not kline_data:
+                logger.warning(f"Empty kline data for {symbol}")
                 return
             
             # Format kline data based on available fields
-            try:
-                # First try the standard format
-                if all(k in data for k in ["t", "o", "h", "l", "c", "v"]):
-                    # Standard format with single-letter keys
-                    kline = {
-                        "time": int(data.get("t", 0)),
-                        "open": float(data.get("o", 0)),
-                        "high": float(data.get("h", 0)),
-                        "low": float(data.get("l", 0)),
-                        "close": float(data.get("c", 0)),
-                        "volume": float(data.get("v", 0))
-                    }
-                elif "k" in data and isinstance(data["k"], dict):
-                    # Nested 'k' object containing kline data
-                    k_data = data["k"]
-                    kline = {
-                        "time": int(k_data.get("t", 0)),
-                        "open": float(k_data.get("o", 0)),
-                        "high": float(k_data.get("h", 0)),
-                        "low": float(k_data.get("l", 0)),
-                        "close": float(k_data.get("c", 0)),
-                        "volume": float(k_data.get("v", 0))
-                    }
-                else:
-                    # Try with full field names
-                    full_field_map = {
-                        "time": ["time", "timestamp", "openTime", "open_time"],
-                        "open": ["open", "Open", "openPrice", "open_price"],
-                        "high": ["high", "High", "highPrice", "high_price"],
-                        "low": ["low", "Low", "lowPrice", "low_price"],
-                        "close": ["close", "Close", "closePrice", "close_price"],
-                        "volume": ["volume", "Volume", "qty", "quantity", "amount"]
-                    }
-                    
-                    kline = {}
-                    for target_field, possible_fields in full_field_map.items():
-                        for field in possible_fields:
-                            if field in data and data[field] is not None:
-                                if target_field == "time":
-                                    kline[target_field] = int(data[field])
-                                else:
-                                    kline[target_field] = float(data[field])
-                                break
-                                
-                    # Check if we found all required fields
-                    if not all(field in kline for field in ["time", "open", "high", "low", "close", "volume"]):
-                        missing = [f for f in ["time", "open", "high", "low", "close", "volume"] if f not in kline]
-                        logger.warning(f"Missing required fields in kline data for {symbol}: {missing}")
-                        return
-            except (ValueError, TypeError) as e:
-                logger.error(f"Error parsing kline values for {symbol}: {e}")
+            # Check if we have the standard fields in the response
+            if all(key in data for key in ['o', 'h', 'l', 'c', 'v']):
+                # Direct fields in the main response
+                kline = {
+                    'time': int(data.get('t', time.time() * 1000)),  # Default to current time if missing
+                    'open': float(data.get('o', 0)),
+                    'high': float(data.get('h', 0)),
+                    'low': float(data.get('l', 0)),
+                    'close': float(data.get('c', 0)),
+                    'volume': float(data.get('v', 0))
+                }
+            elif isinstance(kline_data, dict) and all(key in kline_data for key in ['time', 'open', 'high', 'low', 'close']):
+                # Standard dict format in data field
+                kline = {
+                    'time': int(kline_data.get('time', 0)),
+                    'open': float(kline_data.get('open', 0)),
+                    'high': float(kline_data.get('high', 0)),
+                    'low': float(kline_data.get('low', 0)),
+                    'close': float(kline_data.get('close', 0)),
+                    'volume': float(kline_data.get('volume', 0))
+                }
+            else:
+                logger.warning(f"Could not find required kline fields in data: {data}")
                 return
-                
-            # Đảm bảo kline có dữ liệu hợp lệ
-            if kline["time"] == 0:
-                logger.warning(f"Invalid kline data received for {symbol}: timestamp is 0")
+            
+            # Validate the kline data
+            if kline['time'] <= 0 or kline['open'] <= 0 or kline['close'] <= 0:
+                logger.warning(f"Invalid kline data for {symbol}: {kline}")
                 return
-                
-            # Cập nhật dữ liệu kline
+
+            # Update the internal data structure
             with self._lock:
                 if symbol not in self.kline_data:
                     self.kline_data[symbol] = {}
-                    
                 if interval not in self.kline_data[symbol]:
                     self.kline_data[symbol][interval] = deque(maxlen=self.max_data_points)
-                    
-                # Kiểm tra xem kline đã tồn tại chưa, nếu có thì cập nhật
-                # Tìm kline với thời gian trùng khớp
-                for i, existing_kline in enumerate(self.kline_data[symbol][interval]):
-                    if existing_kline["time"] == kline["time"]:
-                        # Cập nhật kline hiện tại
-                        self.kline_data[symbol][interval][i] = kline
-                        return
-                        
-                # Nếu không tìm thấy kline hiện tại, thêm mới
-                self.kline_data[symbol][interval].append(kline)
                 
-                # Đảm bảo dữ liệu được sắp xếp theo thời gian
-                klines_list = list(self.kline_data[symbol][interval])
-                klines_list.sort(key=lambda x: x["time"])
-                self.kline_data[symbol][interval] = deque(klines_list, maxlen=self.max_data_points)
+                klines = self.kline_data[symbol][interval]
+                
+                # Check if this candle already exists (update it) or is new (add it)
+                existing_idx = None
+                for i, existing_kline in enumerate(klines):
+                    if existing_kline['time'] == kline['time']:
+                        existing_idx = i
+                        break
+                    
+                if existing_idx is not None:
+                    # Update existing candle
+                    klines[existing_idx] = kline
+                    logger.debug(f"Updated existing candle for {symbol} at {datetime.fromtimestamp(kline['time']/1000)}")
+                else:
+                    # Add new candle and ensure the list stays sorted
+                    klines.append(kline)
+                    klines_list = list(klines)
+                    klines_list.sort(key=lambda x: x['time'])
+                    self.kline_data[symbol][interval] = deque(klines_list, maxlen=self.max_data_points)
+                    logger.debug(f"Added new candle for {symbol} at {datetime.fromtimestamp(kline['time']/1000)}")
                 
         except Exception as e:
             logger.error(f"Error processing kline data: {e}")
@@ -396,37 +321,34 @@ class BingxWebSocketClient:
             logger.error(f"Error sending pong: {e}")
     
     async def _subscribe(self, symbol, interval):
-        """Subscribe vào một kênh kline"""
-        if not self.websocket or not self.connected:
-            logger.error("Cannot subscribe: WebSocket not connected")
-            return False
-            
+        """Subscribe to a kline websocket channel."""
         try:
-            subscription_id = f"{symbol}_{interval}"
+            if not self.websocket or not self.is_connected():
+                logger.warning("WebSocket not connected. Cannot subscribe.")
+                return False
+
+            # Format đúng cho dataType: symbol@kline_interval
+            data_type = f"{symbol}@kline_{interval}"
             
-            # Kiểm tra xem đã subscribe chưa
-            if subscription_id in self.subscriptions:
-                logger.info(f"Already subscribed to {subscription_id}")
-                return True
-                
-            # Tạo message subscribe
-            message = {
-                "id": str(int(time.time() * 1000)),
+            # Tạo subscription request đúng định dạng theo tài liệu Bingx
+            subscription = {
+                "id": str(int(time.time() * 1000)),  # Unique ID
                 "reqType": "sub",
-                "dataType": f"kline_{interval}",
-                "symbol": symbol
+                "dataType": data_type
             }
             
-            # Gửi message
-            await self.websocket.send(json.dumps(message))
+            # Convert to JSON and send
+            message = json.dumps(subscription)
             
-            # Đánh dấu là đã subscribe
-            self.subscriptions.add(subscription_id)
-            logger.info(f"Subscribed to {symbol} kline_{interval}")
+            logger.info(f"Subscribing to {data_type}")
+            await self.websocket.send(message)
+            
+            # Add to local subscriptions
+            self.subscriptions.add(data_type)
             
             return True
         except Exception as e:
-            logger.error(f"Error subscribing to {symbol} kline_{interval}: {e}")
+            logger.error(f"Error subscribing to {symbol} {interval}: {e}")
             logger.error(traceback.format_exc())
             return False
     
