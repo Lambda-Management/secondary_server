@@ -79,12 +79,12 @@ def get_ohclv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> List[Dic
         for kline in klines:
             try:
                 formatted_kline = {
-                    "time": int(kline[0]),  # timestamp
-                    "open": float(kline[1]),  # open
-                    "high": float(kline[2]),  # high
-                    "low": float(kline[3]),  # low
-                    "close": float(kline[4]),  # close
-                    "volume": float(kline[5])  # volume
+                    "time": int(kline.get('time', 0)),  # timestamp
+                    "open": float(kline.get('open', 0)),  # open
+                    "high": float(kline.get('high', 0)),  # high
+                    "low": float(kline.get('low', 0)),  # low
+                    "close": float(kline.get('close', 0)),  # close
+                    "volume": float(kline.get('volume', 0))  # volume
                 }
                 formatted_klines.append(formatted_kline)
             except (IndexError, ValueError) as e:
