@@ -74,14 +74,33 @@ def get_ohclv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> List[Dic
             return []
             
         # Lấy dữ liệu từ response
-        klines = data.get("data", [])
+        klines_data = data.get("data", [])
         
-        # Kiểm tra kiểu dữ liệu và log để debug
-        if not isinstance(klines, list):
-            logger.error(f"Unexpected data format for {full_symbol}. Expected list, got {type(klines)}")
+        # Xử lý trường hợp data là dictionary đơn thay vì list
+        if isinstance(klines_data, dict):
+            logger.info(f"Received single candle for {full_symbol}, converting to list format")
+            klines = [klines_data]  # Chuyển đổi thành list chứa 1 phần tử
+        elif isinstance(klines_data, list):
+            klines = klines_data
+        elif isinstance(klines_data, str):
+            # Thử parse nếu là JSON string
+            try:
+                parsed_data = json.loads(klines_data)
+                if isinstance(parsed_data, dict):
+                    klines = [parsed_data]
+                elif isinstance(parsed_data, list):
+                    klines = parsed_data
+                else:
+                    logger.error(f"Unexpected parsed data type: {type(parsed_data)}")
+                    return []
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse data as JSON: {klines_data}")
+                return []
+        else:
+            logger.error(f"Unexpected data format for {full_symbol}. Expected list or dict, got {type(klines_data)}")
             logger.error(f"Raw response data: {data}")
             return []
-            
+        
         # Format dữ liệu theo định dạng chuẩn
         formatted_klines = []
         
