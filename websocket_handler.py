@@ -240,36 +240,87 @@ class BingxWebSocketClient:
             # Extract base symbol (without -USDT)
             symbol = symbol_with_suffix.split('-')[0]
             
-            # Extract kline data from response
-            kline_data = data.get('data', {})
-            if not kline_data:
-                logger.warning(f"Empty kline data for {symbol}")
-                return
+            # Extract kline data from response based on different formats
+            kline = None
             
-            # Format kline data based on available fields
-            # Check if we have the standard fields in the response
-            if all(key in data for key in ['o', 'h', 'l', 'c', 'v']):
-                # Direct fields in the main response
-                kline = {
-                    'time': int(data.get('t', time.time() * 1000)),  # Default to current time if missing
-                    'open': float(data.get('o', 0)),
-                    'high': float(data.get('h', 0)),
-                    'low': float(data.get('l', 0)),
-                    'close': float(data.get('c', 0)),
-                    'volume': float(data.get('v', 0))
-                }
-            elif isinstance(kline_data, dict) and all(key in kline_data for key in ['time', 'open', 'high', 'low', 'close']):
-                # Standard dict format in data field
-                kline = {
-                    'time': int(kline_data.get('time', 0)),
-                    'open': float(kline_data.get('open', 0)),
-                    'high': float(kline_data.get('high', 0)),
-                    'low': float(kline_data.get('low', 0)),
-                    'close': float(kline_data.get('close', 0)),
-                    'volume': float(kline_data.get('volume', 0))
-                }
-            else:
+            # Format 1: Data in 'data' array with 'T' as timestamp
+            if 'data' in data and isinstance(data['data'], list) and len(data['data']) > 0:
+                kline_item = data['data'][0]  # Use first item in the array
+                if all(key in kline_item for key in ['c', 'o', 'h', 'l']) and 'T' in kline_item:
+                    kline = {
+                        'time': int(kline_item.get('T', 0)),
+                        'open': float(kline_item.get('o', 0)),
+                        'high': float(kline_item.get('h', 0)),
+                        'low': float(kline_item.get('l', 0)),
+                        'close': float(kline_item.get('c', 0)),
+                        'volume': float(kline_item.get('v', 0))
+                    }
+                    logger.debug(f"Parsed kline data using Format 1 (data array with T timestamp)")
+            
+            # Format 2: Direct fields in main response
+            elif all(key in data for key in ['o', 'h', 'l', 'c']):
+                timestamp_field = 't' if 't' in data else ('T' if 'T' in data else 'time')
+                if timestamp_field in data:
+                    kline = {
+                        'time': int(data.get(timestamp_field, 0)),
+                        'open': float(data.get('o', 0)),
+                        'high': float(data.get('h', 0)),
+                        'low': float(data.get('l', 0)),
+                        'close': float(data.get('c', 0)),
+                        'volume': float(data.get('v', 0))
+                    }
+                    logger.debug(f"Parsed kline data using Format 2 (direct fields)")
+            
+            # Format 3: Standard format in 'data' object
+            elif 'data' in data and isinstance(data['data'], dict):
+                kline_data = data['data']
+                # Try full field names
+                if all(key in kline_data for key in ['time', 'open', 'high', 'low', 'close']):
+                    kline = {
+                        'time': int(kline_data.get('time', 0)),
+                        'open': float(kline_data.get('open', 0)),
+                        'high': float(kline_data.get('high', 0)),
+                        'low': float(kline_data.get('low', 0)),
+                        'close': float(kline_data.get('close', 0)),
+                        'volume': float(kline_data.get('volume', 0))
+                    }
+                    logger.debug(f"Parsed kline data using Format 3 (standard format)")
+                # Try short field names
+                elif all(key in kline_data for key in ['t', 'o', 'h', 'l', 'c']):
+                    kline = {
+                        'time': int(kline_data.get('t', 0)),
+                        'open': float(kline_data.get('o', 0)),
+                        'high': float(kline_data.get('h', 0)),
+                        'low': float(kline_data.get('l', 0)),
+                        'close': float(kline_data.get('c', 0)),
+                        'volume': float(kline_data.get('v', 0))
+                    }
+                    logger.debug(f"Parsed kline data using Format 3 (short field names)")
+            
+            # Format 4: Nested 'k' format (common in some websocket implementations)
+            elif 'k' in data:
+                k_data = data['k']
+                timestamp_field = 't' if 't' in k_data else ('T' if 'T' in k_data else 'time')
+                if timestamp_field in k_data:
+                    kline = {
+                        'time': int(k_data.get(timestamp_field, 0)),
+                        'open': float(k_data.get('o', 0)),
+                        'high': float(k_data.get('h', 0)),
+                        'low': float(k_data.get('l', 0)),
+                        'close': float(k_data.get('c', 0)),
+                        'volume': float(k_data.get('v', 0))
+                    }
+                    logger.debug(f"Parsed kline data using Format 4 (nested k format)")
+            
+            # Log detailed info about the format if we couldn't parse it
+            if kline is None:
                 logger.warning(f"Could not find required kline fields in data: {data}")
+                # Log detailed structure for debugging
+                if 'data' in data:
+                    logger.debug(f"Data field type: {type(data['data'])}")
+                    if isinstance(data['data'], list) and len(data['data']) > 0:
+                        logger.debug(f"First item in data array: {data['data'][0]}")
+                        logger.debug(f"Keys in first item: {data['data'][0].keys()}")
                 return
             
             # Validate the kline data
