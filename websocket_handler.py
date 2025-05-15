@@ -8,6 +8,7 @@ import traceback
 from typing import Dict, List, Any, Optional, Set
 from collections import deque
 from datetime import datetime
+import codecs
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,29 @@ class BingxWebSocketClient:
     async def _process_message(self, message):
         """Xử lý message từ WebSocket"""
         try:
+            # Check if the message is binary data
+            if isinstance(message, bytes):
+                # Check for gzip compression (magic bytes 0x1f 0x8b)
+                if len(message) > 2 and message[0] == 0x1f and message[1] == 0x8b:
+                    import gzip
+                    try:
+                        # Decompress the message
+                        message = gzip.decompress(message).decode('utf-8')
+                    except Exception as e:
+                        logger.error(f"Failed to decompress gzip data: {e}")
+                        return
+                else:
+                    # Try different encodings
+                    try:
+                        message = message.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            message = message.decode('latin-1')
+                        except Exception as e:
+                            logger.error(f"Failed to decode binary message: {e}")
+                            return
+                    
+            # Now try to parse JSON
             data = json.loads(message)
             
             # Xử lý heartbeat
@@ -141,7 +165,7 @@ class BingxWebSocketClient:
                 if data["e"] == "kline":
                     await self._process_kline(data["data"])
         except json.JSONDecodeError:
-            logger.error(f"Invalid JSON received: {message}")
+            logger.error(f"Invalid JSON received: {message[:100]}...") # Only log part of the message
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             logger.error(traceback.format_exc())

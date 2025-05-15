@@ -53,6 +53,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Fix for proxy routing issues by adding a route at root
+@app.get("/")
+async def root():
+    """Root endpoint for health check."""
+    return {"status": "ok", "message": "Data Service API is running"}
+
 # Cấu hình server
 SERVER_ID = os.environ.get("SERVER_ID", "secondary")  # "primary" hoặc "secondary"
 SERVER_PORT = int(os.environ.get("SERVER_PORT", 8080))
@@ -566,6 +572,12 @@ async def health_check():
         subscribed_symbols=subscribed_count,
         start_time=start_time.strftime("%Y-%m-%d %H:%M:%S")
     )
+
+# Add a duplicate health check at / path for easier access
+@app.get("/health", response_model=HealthCheckResponse)
+async def health_check_alt():
+    """Alternative endpoint for health checks without /api prefix."""
+    return await health_check()
 
 @app.post("/api/symbols")
 async def update_symbols(request: SymbolRequest, background_tasks: BackgroundTasks):

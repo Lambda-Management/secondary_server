@@ -67,10 +67,13 @@ Extract the ZIP file
 Run the appropriate version (32-bit or 64-bit) of nssm.exe
 Use these commands to install as a service:
 
-nssm install DataService "C:\path\to\python.exe" "C:\path\to\data_server\data_service.py"
-nssm set DataService AppDirectory "C:\path\to\project"
-nssm set DataService AppEnvironment "SERVER_ID=secondary^SERVER_PORT=8080"
-nssm start DataService
+C:\Users\Administrator\Desktop\nssm-2.24\win64\nssm.exe install DataService "C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe" "C:\Users\Administrator\Desktop\Develop\secondary_server\data_service.py"
+
+C:\Users\Administrator\Desktop\nssm-2.24\win64\nssm.exe set DataService AppDirectory "C:\Users\Administrator\Desktop\Develop\secondary_server"
+
+C:\Users\Administrator\Desktop\nssm-2.24\win64\nssm.exe set DataService AppEnvironment "SERVER_ID=secondary^SERVER_PORT=8080"
+
+C:\Users\Administrator\Desktop\nssm-2.24\win64\nssm.exe start DataService
 
 
 Configure Windows Firewall:
