@@ -64,6 +64,9 @@ def get_ohclv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> List[Dic
         # Parse JSON
         data = response.json()
         
+        # Log the raw response structure for debugging
+        logger.debug(f"Raw API response structure: {type(data)}")
+        
         # Kiểm tra lỗi từ API
         if "code" not in data or data["code"] != 0:
             error_msg = data.get("msg", "Unknown error")
@@ -73,21 +76,69 @@ def get_ohclv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> List[Dic
         # Lấy dữ liệu từ response
         klines = data.get("data", [])
         
+        # Kiểm tra kiểu dữ liệu và log để debug
+        if not isinstance(klines, list):
+            logger.error(f"Unexpected data format for {full_symbol}. Expected list, got {type(klines)}")
+            logger.error(f"Raw response data: {data}")
+            return []
+            
         # Format dữ liệu theo định dạng chuẩn
         formatted_klines = []
         
         for kline in klines:
             try:
-                formatted_kline = {
-                    "time": int(kline.get('time', 0)),  # timestamp
-                    "open": float(kline.get('open', 0)),  # open
-                    "high": float(kline.get('high', 0)),  # high
-                    "low": float(kline.get('low', 0)),  # low
-                    "close": float(kline.get('close', 0)),  # close
-                    "volume": float(kline.get('volume', 0))  # volume
-                }
+                # Handle different possible formats
+                if isinstance(kline, dict):
+                    # Standard dictionary format
+                    formatted_kline = {
+                        "time": int(kline.get('time', 0)),
+                        "open": float(kline.get('open', 0)),
+                        "high": float(kline.get('high', 0)),
+                        "low": float(kline.get('low', 0)),
+                        "close": float(kline.get('close', 0)),
+                        "volume": float(kline.get('volume', 0))
+                    }
+                elif isinstance(kline, list) and len(kline) >= 6:
+                    # Array format [time, open, high, low, close, volume]
+                    formatted_kline = {
+                        "time": int(kline[0]),
+                        "open": float(kline[1]),
+                        "high": float(kline[2]),
+                        "low": float(kline[3]),
+                        "close": float(kline[4]),
+                        "volume": float(kline[5])
+                    }
+                elif isinstance(kline, str):
+                    # Sometimes data might be strings - try to parse as JSON
+                    logger.warning(f"Received string instead of object/array: {kline}")
+                    try:
+                        parsed = json.loads(kline)
+                        if isinstance(parsed, dict):
+                            formatted_kline = {
+                                "time": int(parsed.get('time', 0)),
+                                "open": float(parsed.get('open', 0)),
+                                "high": float(parsed.get('high', 0)),
+                                "low": float(parsed.get('low', 0)),
+                                "close": float(parsed.get('close', 0)),
+                                "volume": float(parsed.get('volume', 0))
+                            }
+                        else:
+                            logger.warning(f"Parsed string but got unexpected format: {parsed}")
+                            continue
+                    except json.JSONDecodeError:
+                        logger.warning(f"Failed to parse string as JSON: {kline}")
+                        continue
+                else:
+                    logger.warning(f"Unexpected kline format: {type(kline)}")
+                    continue
+                
+                # Validate timestamp
+                if formatted_kline["time"] <= 0:
+                    logger.warning(f"Invalid timestamp: {formatted_kline['time']}")
+                    continue
+                    
                 formatted_klines.append(formatted_kline)
-            except (IndexError, ValueError) as e:
+            except (IndexError, ValueError, TypeError) as e:
                 logger.warning(f"Error parsing kline: {kline} - {e}")
                 continue
                 

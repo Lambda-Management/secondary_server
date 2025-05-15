@@ -789,9 +789,19 @@ def convert_numpy_to_python(obj):
 
 if __name__ == "__main__":
     # Khởi động server
+    import uvicorn
+    
+    # Configure logging levels for Uvicorn to reduce noise
+    log_config = uvicorn.config.LOGGING_CONFIG
+    log_config["loggers"]["uvicorn"]["level"] = "WARNING"
+    log_config["loggers"]["uvicorn.error"]["level"] = "ERROR"
+    log_config["loggers"]["uvicorn.access"]["level"] = "ERROR"
+    
     uvicorn.run(
         "data_service:app", 
         host="0.0.0.0",  # Listen on all network interfaces
         port=SERVER_PORT,
-        reload=False     # Set to False in production
+        reload=False,    # Set to False in production
+        log_config=log_config,
+        access_log=False # Disable access logging to reduce noise
     ) 
