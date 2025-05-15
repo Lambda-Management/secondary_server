@@ -66,7 +66,13 @@ class BingxWebSocketClient:
             try:
                 logger.info("Connecting to Bingx WebSocket...")
                 
-                async with websockets.connect(self.url) as websocket:
+                # Add ping_interval and ping_timeout parameters to handle automatic pings
+                async with websockets.connect(
+                    self.url,
+                    ping_interval=20,  # Send a ping every 20 seconds
+                    ping_timeout=10,   # Wait 10 seconds for pong response
+                    close_timeout=5    # Wait 5 seconds for graceful close
+                ) as websocket:
                     self.websocket = websocket
                     self.connected = True
                     reconnect_delay = 1  # Reset delay on successful connection
@@ -75,21 +81,44 @@ class BingxWebSocketClient:
                     # Resubscribe to all symbols
                     await self._resubscribe()
                     
+                    # Keep track of last message time for custom keepalive
+                    last_message_time = time.time()
+                    
                     # Process incoming messages
                     while self.running:
                         try:
+                            # Check if we need to send a manual ping
+                            current_time = time.time()
+                            if current_time - last_message_time > 25:  # No message for 25 seconds
+                                logger.debug("No messages received for 25 seconds, sending manual ping")
+                                try:
+                                    await websocket.ping()
+                                    last_message_time = current_time
+                                except Exception as e:
+                                    logger.error(f"Error sending manual ping: {e}")
+                                    break
+                                
+                            # Wait for next message with timeout
                             message = await asyncio.wait_for(websocket.recv(), timeout=30)
+                            last_message_time = time.time()  # Update last message time
                             await self._process_message(message)
+                            
                         except asyncio.TimeoutError:
-                            # Send ping to keep connection alive
+                            # No message received for 30 seconds, send ping to keep connection alive
+                            logger.warning("No message received for 30 seconds, checking connection...")
                             try:
                                 pong_waiter = await websocket.ping()
                                 await asyncio.wait_for(pong_waiter, timeout=10)
+                                logger.debug("Ping successful, connection still alive")
+                                last_message_time = time.time()  # Update last ping time
                             except asyncio.TimeoutError:
                                 logger.warning("Ping timeout, reconnecting...")
                                 break
-                        except websockets.exceptions.ConnectionClosed:
-                            logger.warning("WebSocket connection closed, reconnecting...")
+                            except Exception as e:
+                                logger.error(f"Error during ping: {e}")
+                                break
+                        except websockets.exceptions.ConnectionClosed as e:
+                            logger.warning(f"WebSocket connection closed: {e}")
                             break
             
             except Exception as e:
@@ -125,6 +154,13 @@ class BingxWebSocketClient:
     async def _process_message(self, message):
         """Xử lý message từ WebSocket"""
         try:
+            # Check if message is a simple ping (not JSON)
+            if isinstance(message, str) and message.lower() == "ping":
+                logger.debug("Received simple ping message, sending pong")
+                if self.websocket and self.connected:
+                    await self.websocket.send("pong")
+                return
+            
             # Check if the message is binary data
             if isinstance(message, bytes):
                 # Check for gzip compression (magic bytes 0x1f 0x8b)
@@ -165,7 +201,9 @@ class BingxWebSocketClient:
                 if data["e"] == "kline":
                     await self._process_kline(data["data"])
         except json.JSONDecodeError:
-            logger.error(f"Invalid JSON received: {message[:100]}...") # Only log part of the message
+            # Only log first 100 chars to avoid filling logs
+            truncated_msg = message[:100] + "..." if isinstance(message, str) and len(message) > 100 else message
+            logger.error(f"Invalid JSON received: {truncated_msg}")
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             logger.error(traceback.format_exc())
